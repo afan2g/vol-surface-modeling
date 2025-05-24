@@ -23,8 +23,8 @@ function OptionChainTable({ optionChain }) {
       >
         <div style={{ width: "100%" }}>Symbol</div>
         <div style={{ width: "100%" }}>Strike Price</div>
-        <div style={{ width: "100%" }}>Market Price</div>
-        <div style={{ width: "100%" }}>BSM Price</div>
+        <div style={{ width: "100%" }}>Market Premium</div>
+        <div style={{ width: "100%" }}>BSM Premium</div>
         <div style={{ width: "100%" }}>Implied Volatility</div>
         <div style={{ width: "100%" }}>Moneyness {"(lnS/K)"}</div>
       </div>

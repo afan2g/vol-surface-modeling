@@ -4,6 +4,8 @@ import viteLogo from "/vite.svg";
 import "./App.css";
 import Dropdown from "./components/Dropdown.jsx";
 import OptionChainTable from "./components/OptionChainTable.jsx";
+import VolSkewPlot from "./components/VolSkewPlot.jsx";
+import { Tooltip } from "./components/Tooltip.jsx";
 const HOST = "http://127.0.0.1:5000";
 function App() {
   const [count, setCount] = useState(0);
@@ -11,93 +13,67 @@ function App() {
   const [assetSpotPrices, setAssetSpotPrices] = useState([]);
   const [availableExpiries, setAvailableExpiries] = useState([]);
   const [expiryObject, setExpiryObject] = useState({});
-  const [availableStrikes, setAvailableStrikes] = useState([]);
   const [selectedAsset, setSelectedAsset] = useState("");
   const [selectedExpiry, setSelectedExpiry] = useState("");
-  const [selectedStrike, setSelectedStrike] = useState("");
   const [selectedOptionType, setSelectedOptionType] = useState("");
   const [optionData, setOptionData] = useState([]);
+  const [showOptionsChain, setShowOptionsChain] = useState(false);
+  const [showVolSkew, setShowVolSkew] = useState(false);
+  const [volSkewAxis, setVolSkewAxis] = useState("moneyness");
+  const [hoveredPoint, setHoveredPoint] = useState(null);
   const [optionDataLoading, setOptionDataLoading] = useState(false);
   const [optionDataError, setOptionDataError] = useState(null);
   const [optionDataSuccess, setOptionDataSuccess] = useState(false);
 
   useEffect(() => {
-    const fetchAssets = async () => {
-      try {
-        const [assetsResponse, expiriesResponse] = await Promise.all([
-          fetch(`${HOST}/api/assets`),
-          fetch(`${HOST}/api/expiries`),
-        ]);
-        if (!assetsResponse.ok || !expiriesResponse.ok) {
-          throw new Error("Network response was not ok");
-        }
-        const [assetsData, expiriesData] = await Promise.all([
-          assetsResponse.json(),
-          expiriesResponse.json(),
-        ]);
-        setAvailableAssets(assetsData.assets);
-        setAssetSpotPrices(assetsData.spot_prices);
-        setExpiryObject(
-          expiriesData.expiries.reduce((obj, expiry) => {
-            const date = new Date(expiry[0]).toLocaleDateString();
-            obj[date] = expiry[1];
-            return obj;
-          })
-        );
-        setAvailableExpiries(
-          expiriesData.expiries.map((expiry) =>
-            new Date(expiry[0]).toLocaleDateString()
-          )
-        );
-        console.log("Available assets:", assetsData);
-        console.log("Available expiries:", expiriesData);
-      } catch (error) {
-        console.error("Error fetching assets:", error);
-      }
-    };
     fetchAssets();
   }, []);
 
   useEffect(() => {
-    const fetchStrikes = async () => {
-      if (selectedAsset && selectedExpiry && selectedOptionType) {
-        try {
-          const response = await fetch(`${HOST}/api/strikes`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              asset: selectedAsset,
-              expiry: selectedExpiry,
-              side: selectedOptionType.toUpperCase()[0],
-            }),
-          });
-          if (!response.ok) {
-            throw new Error("Network response was not ok");
-          }
-          const data = await response.json();
-          setAvailableStrikes(data.strikes);
-          console.log("Available strikes:", data.strikes);
-        } catch (error) {
-          console.error("Error fetching strikes:", error);
-        }
-      }
-    };
-    fetchStrikes();
+    if (selectedAsset && selectedExpiry && selectedOptionType) {
+      fetchOptionsData();
+    }
   }, [selectedAsset, selectedExpiry, selectedOptionType]);
 
+  const fetchAssets = async () => {
+    try {
+      const [assetsResponse, expiriesResponse] = await Promise.all([
+        fetch(`${HOST}/api/assets`),
+        fetch(`${HOST}/api/expiries`),
+      ]);
+      if (!assetsResponse.ok || !expiriesResponse.ok) {
+        throw new Error("Network response was not ok");
+      }
+      const [assetsData, expiriesData] = await Promise.all([
+        assetsResponse.json(),
+        expiriesResponse.json(),
+      ]);
+      setAvailableAssets(assetsData.assets);
+      setAssetSpotPrices(assetsData.spot_prices);
+      setExpiryObject(expiriesData);
+      console.log("Available assets:", assetsData);
+      console.log("Available expiries:", expiriesData);
+    } catch (error) {
+      console.error("Error fetching assets:", error);
+    }
+  };
+
   const handleExpiryChange = (expiry) => {
-    setSelectedExpiry(expiryObject[expiry]);
-    console.log("Selected expiry:", expiryObject[expiry]);
+    console.log("Expiry selected:", expiry);
+    setSelectedExpiry(expiry[1]);
   };
 
   const handleAssetChange = (asset) => {
+    if (asset === selectedAsset) {
+      return;
+    }
     setSelectedAsset(asset);
-    console.log("Selected asset:", asset);
+    console.log("Asset selected:", asset);
+    console.log("Expiry object:", expiryObject);
+    setAvailableExpiries(expiryObject[asset]);
   };
 
-  const handleOptionsChainFetch = async () => {
+  const fetchOptionsData = async () => {
     if (selectedAsset && selectedExpiry && selectedOptionType) {
       setOptionDataLoading(true);
       setOptionDataError(null);
@@ -119,6 +95,19 @@ function App() {
         }
         const data = await response.json();
         setOptionData(data);
+
+        let strikes = [];
+        if (data["C"]) {
+          strikes = data["C"].map((option) => option.strikePrice);
+        }
+        if (data["P"]) {
+          strikes = [
+            ...strikes,
+            ...data["P"].map((option) => option.strikePrice),
+          ];
+        }
+        strikes = [...new Set(strikes)];
+        strikes.sort((a, b) => parseFloat(a) - parseFloat(b));
         setOptionDataSuccess(true);
         console.log("Options chain data:", data);
       } catch (error) {
@@ -128,6 +117,15 @@ function App() {
         setOptionDataLoading(false);
       }
     }
+  };
+
+  const handleShowOptionsChain = () => {
+    setShowOptionsChain(true);
+    setShowVolSkew(false);
+  };
+  const handleShowVolSkew = () => {
+    setShowOptionsChain(false);
+    setShowVolSkew(true);
   };
   return (
     <div
@@ -143,7 +141,7 @@ function App() {
     >
       <div>
         <Dropdown
-          onSelect={setSelectedAsset}
+          onSelect={handleAssetChange}
           options={availableAssets}
           placeholder="Select an asset"
           text={
@@ -161,16 +159,42 @@ function App() {
           onSelect={setSelectedOptionType}
           options={["call", "put", "all"]}
           placeholder="Select option type"
+          disabled={!selectedAsset}
         />
         <button
-          onClick={handleOptionsChainFetch}
+          onClick={handleShowOptionsChain}
           disabled={!selectedAsset || !selectedExpiry || !selectedOptionType}
         >
-          Fetch Options Chain
+          Show Options Chain
+        </button>
+        <button
+          onClick={handleShowVolSkew}
+          disabled={!selectedAsset || !selectedExpiry || !selectedOptionType}
+        >
+          Show Volatility Skew
         </button>
       </div>
-      {optionData["C"] && <OptionChainTable optionChain={optionData["C"]} />}
-      {optionData["P"] && <OptionChainTable optionChain={optionData["P"]} />}
+      {showVolSkew && (
+        <div style={{ position: "relative" }}>
+          <VolSkewPlot
+            data={optionData}
+            xAxis={volSkewAxis}
+            setHoveredPoint={setHoveredPoint}
+          />
+          <Tooltip interactionData={hoveredPoint} />
+          <Dropdown
+            onSelect={setVolSkewAxis}
+            options={["moneyness", "logMoneyness", "strikePrice"]}
+            defaultValue="moneyness"
+          />
+        </div>
+      )}
+      {showOptionsChain && optionData["C"] && (
+        <OptionChainTable optionChain={optionData["C"]} />
+      )}
+      {showOptionsChain && optionData["P"] && (
+        <OptionChainTable optionChain={optionData["P"]} />
+      )}
     </div>
   );
 }

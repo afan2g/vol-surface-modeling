@@ -34,7 +34,7 @@ class Binance:
         self.option_markets = {}
         self.spot_prices = {}
         self.underlyings = {}
-        self.expiry_dates = []
+        self.expiry_dates = {}
         self.cur_time = time.time() * 1000
         self.get_market_info()
         self.get_spot_markets()
@@ -84,7 +84,6 @@ class Binance:
         """
         info = self.market_info
 
-        dates = set()
         for symbol in info['optionSymbols']:
             expiry_timestamp, underlying, strike_price = symbol['expiryDate'], symbol['underlying'], symbol['strikePrice']
             asset, expiry, strike, side = symbol['symbol'].split('-')
@@ -104,14 +103,14 @@ class Binance:
                 "time_to_expiry": days_to_expiry/365.25,
                 "underlying": underlying,
             })
-            dates.add((expiry_timestamp, expiry))
-        
+            if asset not in self.expiry_dates:
+                self.expiry_dates[asset] = set()
+            self.expiry_dates[asset].add((expiry_timestamp, expiry))
         for asset in self.option_markets:
             for expiry in self.option_markets[asset]:
                 self.option_markets[asset][expiry]['C'] = sorted(self.option_markets[asset][expiry]['C'], key=lambda x: x['strikePrice'])
                 self.option_markets[asset][expiry]['P'] = sorted(self.option_markets[asset][expiry]['P'], key=lambda x: x['strikePrice'])
-        self.expiry_dates = list(dates)
-        self.expiry_dates.sort(key=lambda x: x[0])
+            self.expiry_dates[asset] = sorted(self.expiry_dates[asset], key=lambda x: x[0])
         return self.underlyings, self.option_markets
 
     def get_market_info(self):
@@ -351,9 +350,20 @@ def get_available_assets():
         spot_prices[asset] = BinanceAPI.spot_prices[BinanceAPI.underlyings[asset]]
     return jsonify({'assets': assets, 'spot_prices': spot_prices})
 
-@app.route('/api/expiries', methods=['GET'])
+@app.route('/api/expiries', methods=['GET', 'POST'])
 def get_available_expiries():
-    expiries = list(BinanceAPI.expiry_dates)
+    if request.method == 'POST':
+        data = request.get_json()
+        asset = data.get('asset')
+    else:
+        asset = request.args.get('asset')
+    if not asset:
+        print("No asset provided, returning all expiry dates.")
+        print(BinanceAPI.expiry_dates)
+        return jsonify(BinanceAPI.expiry_dates)
+    if asset not in BinanceAPI.expiry_dates:
+        return jsonify({'error': 'Asset not found'}), 404
+    expiries = list(BinanceAPI.expiry_dates[asset])
     return jsonify({'expiries': expiries})
 
 @app.route('/api/strikes', methods=['GET', 'POST'])
