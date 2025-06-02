@@ -533,6 +533,10 @@ def get_svi_curve():
         return jsonify({'error': 'Failed to calculate SVI curve'}), 500
     return jsonify({'points': points})
 
+@app.route("/")
+def index():
+    return "Hello from Flask on Render!"
+
 if __name__ == "__main__":
     BinanceAPI = Binance()
     app.run(debug=True, port=5000)

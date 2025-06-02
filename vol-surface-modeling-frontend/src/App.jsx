@@ -7,7 +7,7 @@ import OptionChainTable from "./components/OptionChainTable.jsx";
 import VolSkewPlot from "./components/VolSkewPlot.jsx";
 import { Tooltip } from "./components/Tooltip.jsx";
 import SurfaceSVI from "./components/SurfaceSVI.jsx";
-const HOST = "http://127.0.0.1:5000";
+const HOST = "18.156.158.53";
 function App() {
   const [count, setCount] = useState(0);
   const [availableAssets, setAvailableAssets] = useState([]);
