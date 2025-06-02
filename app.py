@@ -339,6 +339,7 @@ class Binance:
     def natural_svi(self, k, delta, mu, rho, omega, zeta):
         return delta + (omega/2) * (1 + (zeta*rho*(k - mu)) + np.sqrt((zeta*(k-mu) + rho) ** 2 + (1 - rho**2)))
     
+    
     def raw_to_svi_jw(a, b, rho, m, sigma, t):
         sqrt_term = np.sqrt(m**2 + sigma**2)
         vt = (a + b * (-rho * m + sqrt_term)) / t

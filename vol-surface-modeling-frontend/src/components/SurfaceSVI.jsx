@@ -28,7 +28,7 @@ function SurfaceSVI() {
     >
       <Canvas>
         <axesHelper args={[100]} />
-        <gridHelper args={[10, 10]} position={[5, 0, 5]} />
+        <gridHelper args={[1, 10]} position={[5, 0, 5]} />
         <gridHelper
           args={[10, 10]}
           rotation={[Math.PI / 2, 0, 0]}
