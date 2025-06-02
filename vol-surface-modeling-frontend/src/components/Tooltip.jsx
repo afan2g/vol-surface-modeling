@@ -2,13 +2,17 @@ export const Tooltip = ({ interactionData, width, height }) => {
   if (!interactionData) {
     return null;
   }
+    const dollarFormatter = new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+  });
 
   return (
     // Wrapper div: a rect on top of the viz area
     <div
       style={{
-        width: 1024,
-        height: 768,
+        width: 1600,
+        height: 900,
         position: "absolute",
         top: 0,
         left: 0,
@@ -23,27 +27,31 @@ export const Tooltip = ({ interactionData, width, height }) => {
           top: interactionData.yPos,
         }}
       >
-        <TooltipRow label={"Option"} value={interactionData.symbol} />
-        <TooltipRow
+        {interactionData.symbol && <TooltipRow label={"Option"} value={interactionData.symbol} />}
+        {interactionData.strikePrice && <TooltipRow
           label={"Strike"}
-          value={`$${parseFloat(interactionData.strikePrice).toFixed(2)}`}
-        />
-        <TooltipRow
+          value={dollarFormatter.format(parseFloat(interactionData.strikePrice))}
+        />}
+       {interactionData.markPrice && <TooltipRow
           label={"Premium"}
-          value={`$${parseFloat(interactionData.markPrice).toFixed(2)}`}
-        />
-        <TooltipRow
+          value={dollarFormatter.format(parseFloat(interactionData.markPrice))}
+        />}
+        {interactionData.markIV && <TooltipRow
           label={"Implied Vol"}
           value={(parseFloat(interactionData.markIV) * 100).toFixed(2) + "%"}
-        />
-        <TooltipRow
+        />}
+        {interactionData.impliedVolatility && <TooltipRow
+          label={"Implied Vol"}
+          value={(parseFloat(interactionData.impliedVolatility) * 100).toFixed(2) + "%"}
+        />}
+        {interactionData.moneyness && <TooltipRow
           label={"Moneyness"}
           value={parseFloat(interactionData.moneyness).toFixed(3)}
-        />
-        <TooltipRow
+        />}
+       {interactionData.logMoneyness && <TooltipRow
           label={"Log Moneyness"}
           value={parseFloat(interactionData.logMoneyness).toFixed(3)}
-        />
+        />}
       </div>
     </div>
   );

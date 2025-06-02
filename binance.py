@@ -6,14 +6,15 @@ import pprint
 from decimal import Decimal, getcontext
 import time
 from scipy.stats import norm
+from scipy.optimize import curve_fit, minimize
 import math
 import matplotlib.pyplot as plt
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-
+import numpy as np
 getcontext().prec = 20
 class Binance:
-    def __init__(self, proxy):
+    def __init__(self, proxy=None):
         self.derivatives_base_endpoint = "https://eapi.binance.com"
         self.spot_base_endpoint = "https://api.binance.com"
         self.endpoints = {
@@ -25,6 +26,7 @@ class Binance:
             "open_interest": self.derivatives_base_endpoint+"/eapi/v1/openInterest",
             "spot": self.spot_base_endpoint+"/api/v3/ticker/price",
         }
+
         self.proxies = {
             "http": proxy,
             "https": proxy
@@ -120,7 +122,9 @@ class Binance:
         """
         if len(self.market_info) == 0:
             response = requests.get(self.endpoints['info'], proxies=self.proxies)
+
             self.market_info = response.json()
+
         return self.market_info
     
     def get_endpoint(self, endpoint, params=None):
@@ -154,12 +158,16 @@ class Binance:
                 underlying = option['underlying']
                 strike_price = option['strikePrice']
                 spot_price = Decimal(self.spot_prices[underlying])
+                time_to_expiry = option['time_to_expiry']
+                implied_volatility = Decimal(mark_iv)
+                total_implied_variance = float(implied_volatility)**2 * time_to_expiry
                 mark_data = {
                     'mark_price': mark_price,
                     'mark_iv': mark_iv,
                     'risk_free_rate': risk_free_rate,
                     'log_moneyness': Decimal(spot_price/strike_price).ln(),
                     'moneyness': Decimal(spot_price/strike_price),
+                    'total_implied_variance': total_implied_variance,
                 }
                 self.option_markets[asset][expiry][side][idx].update(mark_data)
             else:
@@ -307,24 +315,141 @@ class Binance:
                 'bsmPrice': bsm_price,
             })
         return res
-def main():
-
-    load_dotenv()
-    proxy = os.getenv("PROXY")
-    BinanceAPI = Binance(proxy)
     
+    def moneyness_array(self, asset, expiry, side):
+        if asset not in self.option_markets:
+            return None
+        if expiry not in self.option_markets[asset]:
+            return None
+        if side not in 'CPA':
+            return None
+        if side == 'A':
+            call_options = self.option_markets[asset][expiry]['C']
+            put_options = self.option_markets[asset][expiry]['P']
+            options_list = call_options + put_options
+        else:
+            options_list = self.option_markets[asset][expiry][side]
+        k = np.array([float(option['log_moneyness']) for option in options_list])
+        total_implied_variances = np.array([float(option['total_implied_variance']) for option in options_list])
+        return k, total_implied_variances
+    
+    def raw_svi(self, k, a, b, rho, m, sigma):
+        return a + b * (rho * (k - m) + np.sqrt((k - m)**2 + sigma**2))
+    
+    def natural_svi(self, k, delta, mu, rho, omega, zeta):
+        return delta + (omega/2) * (1 + (zeta*rho*(k - mu)) + np.sqrt((zeta*(k-mu) + rho) ** 2 + (1 - rho**2)))
+    
+    def raw_to_svi_jw(a, b, rho, m, sigma, t):
+        sqrt_term = np.sqrt(m**2 + sigma**2)
+        vt = (a + b * (-rho * m + sqrt_term)) / t
+        wt = vt * t
+        psit = (b / (2 * np.sqrt(wt))) * (-m / sqrt_term + rho)
+        pt = (b / np.sqrt(wt)) * (1 - rho)
+        ct = (b / np.sqrt(wt)) * (1 + rho)
+        vt_min = (a + b * sigma * np.sqrt(1 - rho**2)) / t
+        return {'vt': vt, 'psit': psit, 'pt': pt, 'ct': ct, 'vt_min': vt_min}
 
-    call_strikes, call_ivs = BinanceAPI.display_option_chain('BTC', '251226', 'C')
-    put_strikes, put_ivs = BinanceAPI.display_option_chain('BTC', '251226', 'P')
-    plt.scatter(call_strikes, call_ivs, marker='o', color='blue')
-    plt.scatter(put_strikes, put_ivs, marker='x', color='red')
-    plt.legend(['Call Options', 'Put Options'])
-    plt.title(f"Implied Volatility for BTCUSDT Options on 2023-10-25")
-    plt.xlabel("Strike Price")
-    plt.ylabel("Implied Volatility")
-    plt.grid()
-    plt.show()
-
+    def svi_jw_to_raw(vt, psit, pt, ct, vt_min, t):
+        wt = vt * t
+        b = 0.5 * np.sqrt(wt) * (pt + ct)
+        rho = (ct - pt) / (ct + pt)
+        m = -sigma * (psit * 2 * np.sqrt(wt) / b - rho)
+        sigma = (vt_min * t - a) / (b * np.sqrt(1 - rho**2))
+        a = vt * t - b * (-rho * m + np.sqrt(m**2 + sigma**2))
+        return {'a': a, 'b': b, 'rho': rho, 'm': m, 'sigma': sigma}
+    
+    def raw_svi_paramterization(self, asset, expiry, side):
+        """
+        Using svi_model function, we try to find the best-fit parameters a, b, rho, m, sigma that minimizes the difference between the model's calculated total implied variance and the actual total implied variance from the option chain.
+        each option in the option chain comes pre-calculated with its own total implied variance.
+        """
+        k, total_implied_variances = self.moneyness_array(asset, expiry, side)
+        
+        # Initial guess for the parameters a, b, rho, m, sigma
+        initial_guess = [total_implied_variances.mean(), 0.5, 0.0, k.mean(), 0.1]
+        # Bounds for the parameters a, b, rho, m, sigma
+        # a: all real numbers, b >= 0, rho: [-1, 1], m: all real numbers, sigma > 0
+        bounds = ([-np.inf, 0, -0.999, -np.inf, 0.001], 
+                  [np.inf, np.inf, 0.999, np.inf, np.inf])
+        try:
+            params, _ = curve_fit(self.raw_svi, k, total_implied_variances, p0=initial_guess, bounds=bounds, maxfev=10000)
+        except Exception as e:
+            print(f"Error during SVI fit: {e}")
+            return None
+        return params
+    
+    def natural_svi_paramterization(self, asset, expiry, side):
+        k, total_implied_variances = self.moneyness_array(asset, expiry, side)
+        # Initial guess for the parameters delta, mu, rho, omega, zeta
+        initial_guess = [total_implied_variances.mean(), k.mean(), 0.0, 0.5, 0.1]
+        # Bounds for the parameters delta, mu, rho, omega, zeta
+        # delta: all real numbers, mu: all real numbers, rho: [-1, 1], omega >= 0, zeta > 0
+        bounds = ([-np.inf, -np.inf, -0.999, 0, 0.001], 
+                  [np.inf, np.inf, 0.999, np.inf, np.inf])
+        
+        try:
+            params, _ = curve_fit(self.natural_svi, k, total_implied_variances, p0=initial_guess, bounds=bounds, maxfev=10000)
+        except Exception as e:
+            print(f"Error during SVI fit: {e}")
+            return None
+        return params
+    
+    def svi_jw_paramterization(self, asset, expiry, side):
+        a, b, rho, m, sigma = self.raw_svi_paramterization(asset, expiry, side)
+        # Convert raw SVI parameters to JW parameters
+        t = self.option_markets[asset][expiry]['C'][0]['time_to_expiry'] if side == 'C' else self.option_markets[asset][expiry]['P'][0]['time_to_expiry']
+        svi_params = self.raw_to_svi_jw(a, b, rho, m, sigma, t)
+        return svi_params['vt'], svi_params['psit'], svi_params['pt'], svi_params['ct'], svi_params['vt_min']
+    
+    def get_svi_curve_points(self, asset, expiry, side, paramterization_type='raw'):
+        """
+        Get SVI curve points for a given asset, expiry, and side.
+        :param asset: Asset to get SVI curve points for
+        :param expiry: Expiry to get SVI curve points for
+        :param side: Side to get SVI curve points for
+        :return: SVI curve points
+        """
+        if paramterization_type not in ['raw', 'natural']:
+            raise ValueError("Invalid parameterization type. Use 'raw' or 'natural'.")
+        if paramterization_type == 'natural':
+            params = self.natural_svi_paramterization(asset, expiry, side)
+            delta, mu, rho, omega, zeta = params
+        elif paramterization_type == 'raw':
+            params = self.raw_svi_paramterization(asset, expiry, side)
+            a, b, rho, m, sigma = params
+        
+        k = []
+        if side == 'A':
+            call_options = self.option_markets[asset][expiry]['C']
+            put_options = self.option_markets[asset][expiry]['P']
+            options_list = call_options + put_options
+            k = [float(option['log_moneyness']) for option in call_options + put_options]
+        else:
+            options_list = self.option_markets[asset][expiry][side]
+            k = [float(option['log_moneyness']) for option in options_list]
+        options_list = [(option['log_moneyness'], option['markIV']) for option in options_list if 'markIV' in option]
+        x_points = np.linspace(min(k)-0.1, max(k)+0.1, 100)  # Adjust range as needed
+        if paramterization_type == 'natural':
+            svi_values = self.natural_svi(x_points, delta, mu, rho, omega, zeta)
+        elif paramterization_type == 'raw':
+            svi_values = self.raw_svi(x_points, a, b, rho, m, sigma)
+        points = []
+        time_to_expiry = self.option_markets[asset][expiry]['C'][0]['time_to_expiry'] if side == 'C' else self.option_markets[asset][expiry]['P'][0]['time_to_expiry']
+        implied_vols = np.sqrt(svi_values / time_to_expiry)  # Convert total implied variance to implied volatility
+        self.get_spot_markets()
+        spot_price = Decimal(self.spot_prices[self.underlyings[asset]])
+        for k_val, iv in zip(x_points, implied_vols):
+            strike = spot_price / Decimal(math.exp(k_val))
+            moneyness = Decimal(math.exp(k_val))
+            points.append({
+                'logMoneyness': float(k_val),
+                'strikePrice': float(strike),
+                'moneyness': float(moneyness),
+                'impliedVolatility': float(iv),
+            })
+        return points
+                
+        
 app = Flask(__name__)
 CORS(app)
 
@@ -358,8 +483,6 @@ def get_available_expiries():
     else:
         asset = request.args.get('asset')
     if not asset:
-        print("No asset provided, returning all expiry dates.")
-        print(BinanceAPI.expiry_dates)
         return jsonify(BinanceAPI.expiry_dates)
     if asset not in BinanceAPI.expiry_dates:
         return jsonify({'error': 'Asset not found'}), 404
@@ -377,8 +500,6 @@ def get_available_strikes():
         asset = request.args.get('asset')
         expiry = request.args.get('expiry')
         side = request.args.get('side')
-    print(f"Asset: {asset}, Expiry: {expiry}, Side: {side}")
-    print(BinanceAPI.option_markets[asset][expiry])
     if side == 'A':
         call_strikes = [option['strikePrice'] for option in BinanceAPI.option_markets[asset][expiry]['C']]
         put_strikes = [option['strikePrice'] for option in BinanceAPI.option_markets[asset][expiry]['P']]
@@ -388,9 +509,30 @@ def get_available_strikes():
     return jsonify({'strikes': strikes})
 
 
+@app.route('/api/svi_curve', methods=['GET', 'POST'])
+def get_svi_curve():
+    if request.method == 'POST':
+        data = request.get_json()
+        asset = data.get('asset')
+        expiry = data.get('expiry')
+        side = data.get('side')
+        parameterization_type = data.get('parameterization_type', 'raw')
+    else:
+        asset = request.args.get('asset')
+        expiry = request.args.get('expiry')
+        side = request.args.get('side')
+        parameterization_type = request.args.get('parameterization_type', 'raw')
+    try:
+        points = BinanceAPI.get_svi_curve_points(asset, expiry, side, parameterization_type)
+    except Exception as e:
+        print(f"Error calculating SVI curve: {e}")
+        return jsonify({'error': 'Failed to calculate SVI curve'}), 500
+    
+    if points is None:
+        return jsonify({'error': 'Failed to calculate SVI curve'}), 500
+    return jsonify({'points': points})
+
 if __name__ == "__main__":
-    load_dotenv()
-    proxy = os.getenv("PROXY")
-    BinanceAPI = Binance(proxy)
+    BinanceAPI = Binance()
     app.run(debug=True, port=5000)
 

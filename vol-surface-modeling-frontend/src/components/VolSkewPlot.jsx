@@ -1,5 +1,5 @@
 import { svg } from "d3";
-import React from "react";
+import React, { useEffect, useMemo } from "react";
 import * as d3 from "d3";
 /* 
 available data: 
@@ -24,7 +24,7 @@ plot these data points, where x-axis is the moneyness, log moneyness, or strike 
 
 function VolSkewPlot({
   data,
-  xAxis = "moneyness",
+  xAxis = "logMoneyness",
   dimensions = {
     width: 1024,
     height: 768,
@@ -33,11 +33,12 @@ function VolSkewPlot({
     marginBottom: 20,
     marginLeft: 20,
   },
-  setHoveredPoint = () => {},
+  onPointHover = () => {},
+  sviPoints = [],
 }) {
   const { width, height, marginTop, marginRight, marginBottom, marginLeft } =
     dimensions;
-
+  const [hoveredPoint, setHoveredPoint] = React.useState(null);
   // Extract calls and puts from the data object
   const calls = data.C || [];
   const puts = data.P || [];
@@ -58,6 +59,38 @@ function VolSkewPlot({
     .nice()
     .range([height - marginBottom, marginTop]);
 
+  const sviPath = useMemo(() => {
+    if (!sviPoints || sviPoints.length === 0) return null;
+    const lineGenerator = d3
+      .line()
+      .x((d) => x(parseFloat(d[xAxis])))
+      .y((d) => y(parseFloat(d.impliedVolatility || d.y))) // Handle naming differences
+      .curve(d3.curveMonotoneX);
+    return lineGenerator(sviPoints);
+  }, [xAxis, sviPoints, x, y]);
+
+    const handleMouseMove = (event) => {
+    const mouseX = event.nativeEvent.offsetX;
+    const xValue = x.invert(mouseX);
+    let closestPoint = sviPoints.reduce((prev, curr) => {
+      return Math.abs(parseFloat(curr[xAxis]) - xValue) < Math.abs(parseFloat(prev[xAxis]) - xValue) ? curr : prev;
+    });
+    onPointHover({
+      ...closestPoint,
+      xPos: x(parseFloat(closestPoint[xAxis])),
+      yPos: y(parseFloat(closestPoint.impliedVolatility || closestPoint.y)),
+    });
+  };
+
+  const handlePointHover = (point) => {
+    setHoveredPoint(point);
+    onPointHover(point);
+  };
+
+  const handleMouseLeave = () => {
+    setHoveredPoint(null);
+    onPointHover(null);
+  }
   return (
     <div>
       <svg
@@ -77,15 +110,13 @@ function VolSkewPlot({
             strokeWidth={1}
             opacity={0.8}
             onMouseOver={() => {
-              setHoveredPoint({
+              handlePointHover({
                 ...option,
                 xPos: x(parseFloat(option[xAxis])),
                 yPos: y(parseFloat(option.markIV)),
               });
             }}
-            onMouseOut={() => {
-              setHoveredPoint(null);
-            }}
+            onMouseOut={handleMouseLeave}
           />
         ))}
 
@@ -101,17 +132,22 @@ function VolSkewPlot({
             strokeWidth={1}
             opacity={0.8}
             onMouseOver={() => {
-              setHoveredPoint({
+              handlePointHover({
                 ...option,
                 xPos: x(parseFloat(option[xAxis])),
                 yPos: y(parseFloat(option.markIV)),
               });
             }}
-            onMouseOut={() => {
-              setHoveredPoint(null);
-            }}
+            onMouseOut={handleMouseLeave}
           />
         ))}
+        {/* SVI points - rendered in green */}
+        {sviPath && (
+          <>
+          <path d={sviPath} stroke="#22c55e" strokeWidth={2} fill="none" />
+          <path d={sviPath} stroke="transparent" strokeWidth={10} fill="none" onMouseMove={handleMouseMove} onMouseLeave={handleMouseLeave}/>
+          </>
+        )}
 
         {/* X-axis */}
         <g transform={`translate(0, ${height - marginBottom})`}>

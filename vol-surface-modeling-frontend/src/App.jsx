@@ -6,6 +6,7 @@ import Dropdown from "./components/Dropdown.jsx";
 import OptionChainTable from "./components/OptionChainTable.jsx";
 import VolSkewPlot from "./components/VolSkewPlot.jsx";
 import { Tooltip } from "./components/Tooltip.jsx";
+import SurfaceSVI from "./components/SurfaceSVI.jsx";
 const HOST = "http://127.0.0.1:5000";
 function App() {
   const [count, setCount] = useState(0);
@@ -19,12 +20,14 @@ function App() {
   const [optionData, setOptionData] = useState([]);
   const [showOptionsChain, setShowOptionsChain] = useState(false);
   const [showVolSkew, setShowVolSkew] = useState(false);
-  const [volSkewAxis, setVolSkewAxis] = useState("moneyness");
+  const [volSkewAxis, setVolSkewAxis] = useState("logMoneyness");
   const [hoveredPoint, setHoveredPoint] = useState(null);
   const [optionDataLoading, setOptionDataLoading] = useState(false);
   const [optionDataError, setOptionDataError] = useState(null);
   const [optionDataSuccess, setOptionDataSuccess] = useState(false);
-
+  const [sviPoints, setSviPoints] = useState([]);
+  const [sviLoading, setSviLoading] = useState(false);
+  const [sceneVisible, setSceneVisible] = useState(false);
   useEffect(() => {
     fetchAssets();
   }, []);
@@ -33,6 +36,9 @@ function App() {
     if (selectedAsset && selectedExpiry && selectedOptionType) {
       fetchOptionsData();
     }
+    setShowOptionsChain(false);
+    setShowVolSkew(false);
+    setSviPoints([]);
   }, [selectedAsset, selectedExpiry, selectedOptionType]);
 
   const fetchAssets = async () => {
@@ -127,6 +133,42 @@ function App() {
     setShowOptionsChain(false);
     setShowVolSkew(true);
   };
+
+  const handleShowCurve = async () => {
+    if (selectedAsset && selectedExpiry && selectedOptionType) {
+      setOptionDataLoading(true);
+      setOptionDataError(null);
+      setOptionDataSuccess(false);
+      setSviLoading(true);
+      try {
+        const response = await fetch(`${HOST}/api/svi_curve`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            asset: selectedAsset,
+            expiry: selectedExpiry,
+            side: selectedOptionType.toUpperCase()[0],
+          }),
+        });
+        if (!response.ok) {
+          throw new Error("Network response was not ok");
+        }
+        const curve_data = await response.json();
+        const data = curve_data.points;
+        console.log("SVI curve data:", data);
+        setSviPoints(data);
+        setOptionDataSuccess(true);
+      } catch (error) {
+        setOptionDataError(error.message);
+        console.error("Error fetching volatility curve:", error);
+      } finally {
+        setOptionDataLoading(false);
+        setSviLoading(false);
+      }
+    }
+  };
   return (
     <div
       style={{
@@ -163,29 +205,58 @@ function App() {
         />
         <button
           onClick={handleShowOptionsChain}
-          disabled={!selectedAsset || !selectedExpiry || !selectedOptionType}
+          disabled={
+            !selectedAsset ||
+            !selectedExpiry ||
+            !selectedOptionType ||
+            showOptionsChain
+          }
         >
           Show Options Chain
         </button>
         <button
           onClick={handleShowVolSkew}
-          disabled={!selectedAsset || !selectedExpiry || !selectedOptionType}
+          disabled={
+            !selectedAsset ||
+            !selectedExpiry ||
+            !selectedOptionType ||
+            showVolSkew
+          }
         >
           Show Volatility Skew
         </button>
+        <button
+          onClick={handleShowCurve}
+          disabled={
+            !selectedAsset ||
+            !selectedExpiry ||
+            !selectedOptionType ||
+            !showVolSkew ||
+            sviLoading
+          }
+        >
+          {sviLoading ? "Loading Points..." : "Show SVI Curve"}
+        </button>
+        <button onClick={() => setSceneVisible(!sceneVisible)}>
+          Show Scene
+        </button>
       </div>
+      {sceneVisible && (
+        <SurfaceSVI />
+      )}
       {showVolSkew && (
         <div style={{ position: "relative" }}>
           <VolSkewPlot
             data={optionData}
             xAxis={volSkewAxis}
-            setHoveredPoint={setHoveredPoint}
+            onPointHover={setHoveredPoint}
+            sviPoints={sviPoints}
           />
           <Tooltip interactionData={hoveredPoint} />
           <Dropdown
             onSelect={setVolSkewAxis}
-            options={["moneyness", "logMoneyness", "strikePrice"]}
-            defaultValue="moneyness"
+            options={["logMoneyness", "moneyness", "strikePrice"]}
+            defaultValue="logMoneyness"
           />
         </div>
       )}

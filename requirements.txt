@@ -1,0 +1,8 @@
+requests
+dotenv
+scipy
+numpy
+pandas
+matplotlib
+flask
+flask-cors
