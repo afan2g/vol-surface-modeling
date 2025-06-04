@@ -26,6 +26,7 @@ function App() {
   const [optionDataError, setOptionDataError] = useState(null);
   const [optionDataSuccess, setOptionDataSuccess] = useState(false);
   const [sviPoints, setSviPoints] = useState([]);
+  const [sviParams, setSviParams] = useState({});
   const [sviLoading, setSviLoading] = useState(false);
   const [sceneVisible, setSceneVisible] = useState(false);
   useEffect(() => {
@@ -156,9 +157,11 @@ function App() {
           throw new Error("Network response was not ok");
         }
         const curve_data = await response.json();
-        const data = curve_data.points;
+        const points = curve_data.points;
+        const params = curve_data.params;
         console.log("SVI curve data:", data);
-        setSviPoints(data);
+        setSviPoints(points);
+        setSviParams(params);
         setOptionDataSuccess(true);
       } catch (error) {
         setOptionDataError(error.message);

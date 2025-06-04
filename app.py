@@ -448,7 +448,7 @@ class Binance:
                 'moneyness': float(moneyness),
                 'impliedVolatility': float(iv),
             })
-        return points
+        return (points, params)
                 
         
 app = Flask(__name__)
@@ -524,20 +524,24 @@ def get_svi_curve():
         side = request.args.get('side')
         parameterization_type = request.args.get('parameterization_type', 'raw')
     try:
-        points = BinanceAPI.get_svi_curve_points(asset, expiry, side, parameterization_type)
+        points, params = BinanceAPI.get_svi_curve_points(asset, expiry, side, parameterization_type)
+
+        
     except Exception as e:
         print(f"Error calculating SVI curve: {e}")
         return jsonify({'error': 'Failed to calculate SVI curve'}), 500
     
     if points is None:
         return jsonify({'error': 'Failed to calculate SVI curve'}), 500
-    return jsonify({'points': points})
+    return jsonify({'points': points, 'params': params, 'parameterization_type': parameterization_type})
 
 @app.route("/")
 def index():
     return "Hello from Flask on Render!"
 
 if __name__ == "__main__":
+    load_dotenv()
+    proxy = os.getenv("PROXY")
     BinanceAPI = Binance()
     app.run(debug=True, port=5000)
 
