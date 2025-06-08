@@ -448,6 +448,7 @@ class Binance:
                 'moneyness': float(moneyness),
                 'impliedVolatility': float(iv),
             })
+        return (points, params.tolist())
 
         return (points, params)
                 
