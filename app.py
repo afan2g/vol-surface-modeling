@@ -450,8 +450,6 @@ class Binance:
             })
         return (points, params.tolist())
 
-        return (points, params)
-                
         
 app = Flask(__name__)
 CORS(app)
@@ -536,7 +534,7 @@ def get_svi_curve():
     
     if points is None:
         return jsonify({'error': 'Failed to calculate SVI curve'}), 500
-    return jsonify({'points': points, 'params': params.tolist(), 'parameterization_type': parameterization_type})
+    return jsonify({'points': points, 'params': params, 'parameterization_type': parameterization_type})
 
 @app.route("/")
 def index():
