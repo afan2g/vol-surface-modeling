@@ -449,7 +449,6 @@ class Binance:
                 'impliedVolatility': float(iv),
             })
 
-        print("params:", params)
         return (points, params)
                 
         
