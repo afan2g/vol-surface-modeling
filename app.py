@@ -448,11 +448,14 @@ class Binance:
                 'moneyness': float(moneyness),
                 'impliedVolatility': float(iv),
             })
+
+        print("params:", params)
         return (points, params)
                 
         
 app = Flask(__name__)
 CORS(app)
+BinanceAPI = Binance()
 
 @app.route('/api/option_chain', methods=['GET', 'POST'])
 def get_option_chain():
@@ -533,15 +536,12 @@ def get_svi_curve():
     
     if points is None:
         return jsonify({'error': 'Failed to calculate SVI curve'}), 500
-    return jsonify({'points': points, 'params': params, 'parameterization_type': parameterization_type})
+    return jsonify({'points': points, 'params': params.tolist(), 'parameterization_type': parameterization_type})
 
 @app.route("/")
 def index():
     return "Hello from Flask on Render!"
 
 if __name__ == "__main__":
-    load_dotenv()
-    proxy = os.getenv("PROXY")
-    BinanceAPI = Binance()
     app.run(debug=True, port=5000)
 

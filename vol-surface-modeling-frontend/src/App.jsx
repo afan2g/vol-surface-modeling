@@ -7,7 +7,7 @@ import OptionChainTable from "./components/OptionChainTable.jsx";
 import VolSkewPlot from "./components/VolSkewPlot.jsx";
 import { Tooltip } from "./components/Tooltip.jsx";
 import SurfaceSVI from "./components/SurfaceSVI.jsx";
-const HOST = "18.156.158.53";
+const HOST = "https://api.svi.aaron.fan"
 function App() {
   const [count, setCount] = useState(0);
   const [availableAssets, setAvailableAssets] = useState([]);
@@ -159,7 +159,7 @@ function App() {
         const curve_data = await response.json();
         const points = curve_data.points;
         const params = curve_data.params;
-        console.log("SVI curve data:", data);
+        console.log("SVI curve data:", curve_data);
         setSviPoints(points);
         setSviParams(params);
         setOptionDataSuccess(true);
