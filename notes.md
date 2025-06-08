@@ -11,3 +11,4 @@ vol surface: https://quant.stackexchange.com/questions/76366/option-pricing-for-
 implied volatility calculation: https://quant.stackexchange.com/questions/7761/a-simple-formula-for-calculating-implied-volatility
 https://quant.stackexchange.com/questions/73861/is-it-possible-to-have-only-one-volatility-surface-for-american-options-that-fi/73891#73891
 SVI paramterization: https://quant.stackexchange.com/questions/49034/why-is-the-svi-parameterization-in-terms-of-variance
+https://mfe.baruch.cuny.edu/wp-content/uploads/2013/01/OsakaSVI2012.pdf

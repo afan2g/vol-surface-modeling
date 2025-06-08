@@ -7,7 +7,7 @@ import OptionChainTable from "./components/OptionChainTable.jsx";
 import VolSkewPlot from "./components/VolSkewPlot.jsx";
 import { Tooltip } from "./components/Tooltip.jsx";
 import SurfaceSVI from "./components/SurfaceSVI.jsx";
-const HOST = "18.156.158.53";
+const HOST = "https://api.svi.aaron.fan";
 function App() {
   const [count, setCount] = useState(0);
   const [availableAssets, setAvailableAssets] = useState([]);
@@ -25,8 +25,8 @@ function App() {
   const [optionDataLoading, setOptionDataLoading] = useState(false);
   const [optionDataError, setOptionDataError] = useState(null);
   const [optionDataSuccess, setOptionDataSuccess] = useState(false);
-  const [sviPoints, setSviPoints] = useState([]);
-  const [sviParams, setSviParams] = useState({});
+  const [sviPoints, setSviPoints] = useState(null);
+  const [sviParams, setSviParams] = useState(null);
   const [sviLoading, setSviLoading] = useState(false);
   const [sceneVisible, setSceneVisible] = useState(false);
   useEffect(() => {
@@ -39,7 +39,8 @@ function App() {
     }
     setShowOptionsChain(false);
     setShowVolSkew(false);
-    setSviPoints([]);
+    setSviPoints(null);
+    setSviParams(null);
   }, [selectedAsset, selectedExpiry, selectedOptionType]);
 
   const fetchAssets = async () => {
@@ -135,6 +136,28 @@ function App() {
     setShowVolSkew(true);
   };
 
+  const handleRefresh = () => {
+    setSelectedAsset("");
+    setSelectedExpiry("");
+    setSelectedOptionType("");
+    setOptionData([]);
+    setShowOptionsChain(false);
+    setShowVolSkew(false);
+    setSviPoints(null);
+    setSviParams(null);
+    setHoveredPoint(null);
+    setOptionDataLoading(false);
+    setOptionDataError(null);
+    setOptionDataSuccess(false);
+    setSviLoading(false);
+    setSceneVisible(false);
+    setAssetSpotPrices([]);
+    setAvailableAssets([]);
+    setAvailableExpiries([]);
+    setExpiryObject({});
+    fetchAssets();
+  };
+
   const handleShowCurve = async () => {
     if (selectedAsset && selectedExpiry && selectedOptionType) {
       setOptionDataLoading(true);
@@ -159,7 +182,7 @@ function App() {
         const curve_data = await response.json();
         const points = curve_data.points;
         const params = curve_data.params;
-        console.log("SVI curve data:", data);
+        console.log("SVI curve data:", curve_data);
         setSviPoints(points);
         setSviParams(params);
         setOptionDataSuccess(true);
@@ -172,6 +195,7 @@ function App() {
       }
     }
   };
+
   return (
     <div
       style={{
@@ -185,6 +209,7 @@ function App() {
       }}
     >
       <div>
+        <button onClick={fetchAssets}>Refresh Assets</button>
         <Dropdown
           onSelect={handleAssetChange}
           options={availableAssets}
@@ -235,7 +260,9 @@ function App() {
             !selectedExpiry ||
             !selectedOptionType ||
             !showVolSkew ||
-            sviLoading
+            sviLoading ||
+            sviParams ||
+            sviPoints
           }
         >
           {sviLoading ? "Loading Points..." : "Show SVI Curve"}
@@ -244,9 +271,7 @@ function App() {
           Show Scene
         </button>
       </div>
-      {sceneVisible && (
-        <SurfaceSVI />
-      )}
+      {sceneVisible && <SurfaceSVI />}
       {showVolSkew && (
         <div style={{ position: "relative" }}>
           <VolSkewPlot

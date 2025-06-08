@@ -448,7 +448,7 @@ class Binance:
                 'moneyness': float(moneyness),
                 'impliedVolatility': float(iv),
             })
-        return (points, params)
+        return (points, params.tolist())
                 
         
 app = Flask(__name__)
