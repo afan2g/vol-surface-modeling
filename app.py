@@ -66,7 +66,7 @@ class Binance:
         data = response.json()
         for item in data:
             symbol = item['symbol']
-            price = Decimal(item['price'])
+            price = float(item['price'])
             self.spot_prices[symbol] = price
         return self.spot_prices
 
@@ -98,7 +98,7 @@ class Binance:
                 self.option_markets[asset][expiry] = {'C': [], 'P': []}
             self.option_markets[asset][expiry][side].append({
                 "symbol": symbol['symbol'],
-                "strikePrice": Decimal(strike_price),
+                "strikePrice": float(strike_price),
                 "expiry": expiry_timestamp,
                 "time_to_expiry_ms": expiry_timestamp - self.cur_time,
                 "days_to_expiry": (expiry_timestamp - self.cur_time) / (1000 * 60 * 60 * 24),
@@ -148,26 +148,29 @@ class Binance:
         mark_info = self.get_marks()
         for data in mark_info:
             symbol = data['symbol']
-            mark_price = data['markPrice']
-            mark_iv = data['markIV']
-            risk_free_rate = data['riskFreeInterest']
+            mark_price = float(data['markPrice'])
+            mark_iv = float(data['markIV'])
+            risk_free_rate = float(data['riskFreeInterest'])
             asset, expiry, strike, side = symbol.split('-')
-            idx = self.find_mark_index(asset, expiry, strike, side)
+            idx = self.find_mark_index(asset, expiry, float(strike), side)
             if idx is not None:
                 option = self.option_markets[asset][expiry][side][idx]
                 underlying = option['underlying']
                 strike_price = option['strikePrice']
-                spot_price = Decimal(self.spot_prices[underlying])
-                time_to_expiry = option['time_to_expiry']
-                implied_volatility = Decimal(mark_iv)
+                spot_price = self.spot_prices[underlying]
+                spot_price, strike_price = map(float, (spot_price, strike_price))
+                time_to_expiry = float(option['time_to_expiry'])
+                implied_volatility = float(mark_iv)
                 total_implied_variance = float(implied_volatility)**2 * time_to_expiry
+                forward_price = spot_price * math.exp(risk_free_rate * time_to_expiry)
                 mark_data = {
                     'mark_price': mark_price,
                     'mark_iv': mark_iv,
                     'risk_free_rate': risk_free_rate,
-                    'log_moneyness': Decimal(spot_price/strike_price).ln(),
-                    'moneyness': Decimal(spot_price/strike_price),
+                    'log_moneyness': math.log(strike_price/forward_price),
+                    'moneyness': strike_price/forward_price,
                     'total_implied_variance': total_implied_variance,
+                    'forward_price': forward_price,
                 }
                 self.option_markets[asset][expiry][side][idx].update(mark_data)
             else:
@@ -193,7 +196,7 @@ class Binance:
         if not options_list:
             return None
         l,r = 0, len(self.option_markets[asset][expiry][side]) - 1
-        target = Decimal(str(strike))
+        target = strike
         while l <= r:
             mid = (l + r) // 2
             mid_strike = options_list[mid]['strikePrice']
@@ -232,24 +235,17 @@ class Binance:
         :param r: Risk-free interest rate
         :param sigma: Volatility
         :param option_type: 'C' for Call, 'P' for Put
-        :return: Option price as Decimal
+        :return: Option price as float
         """
-
-        S, K, T, r, sigma = map(Decimal, (S, K, T, r, sigma))
-
-        sqrt_T = T.sqrt()
-        d1 = ((S / K).ln() + (r + sigma**2 / 2) * T) / (sigma * sqrt_T)
-        d2 = d1 - sigma * sqrt_T
-
-        # Convert to float for CDF calls
-        d1_f = float(d1)
-        d2_f = float(d2)
-        rT_f = float(-r * T)
+        S, K, T, r, sigma = map(float, (S, K, T, r, sigma))
+        sqrtT = math.sqrt(T)
+        d1 = (math.log(S/K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrtT)
+        d2 = d1 - sigma * sqrtT
 
         if option_type == 'C':
-            price = S * Decimal(norm.cdf(d1_f)) - K * Decimal(math.exp(rT_f)) * Decimal(norm.cdf(d2_f))
-        elif option_type == 'P':
-            price = K * Decimal(math.exp(rT_f)) * Decimal(norm.cdf(-d2_f)) - S * Decimal(norm.cdf(-d1_f))
+            return S * norm.cdf(d1) - K * math.exp(-r * T) * norm.cdf(d2)
+        else:
+            return K * math.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
         else:
             raise ValueError("Invalid option type. Use 'C' for call and 'P' for put.")
         
@@ -299,7 +295,7 @@ class Binance:
             days_to_expiry = option['days_to_expiry']
             moneyness = option['moneyness']
             log_moneyness = option['log_moneyness']
-            spot_price = Decimal(self.spot_prices[option['underlying']])
+            spot_price = float(self.spot_prices[option['underlying']])
             bsm_price = self.calculate_option_price(spot_price, strike_price, time_to_expiry, risk_free_rate, mark_iv, side)
             res.append({
                 'symbol': symbol,
@@ -340,7 +336,7 @@ class Binance:
         return delta + (omega/2) * (1 + (zeta*rho*(k - mu)) + np.sqrt((zeta*(k-mu) + rho) ** 2 + (1 - rho**2)))
     
     
-    def raw_to_svi_jw(a, b, rho, m, sigma, t):
+    def raw_to_svi_jw(self, a, b, rho, m, sigma, t):
         sqrt_term = np.sqrt(m**2 + sigma**2)
         vt = (a + b * (-rho * m + sqrt_term)) / t
         wt = vt * t
@@ -350,7 +346,7 @@ class Binance:
         vt_min = (a + b * sigma * np.sqrt(1 - rho**2)) / t
         return {'vt': vt, 'psit': psit, 'pt': pt, 'ct': ct, 'vt_min': vt_min}
 
-    def svi_jw_to_raw(vt, psit, pt, ct, vt_min, t):
+    def svi_jw_to_raw(self, vt, psit, pt, ct, vt_min, t):
         wt = vt * t
         b = 0.5 * np.sqrt(wt) * (pt + ct)
         rho = (ct - pt) / (ct + pt)
@@ -359,7 +355,7 @@ class Binance:
         a = vt * t - b * (-rho * m + np.sqrt(m**2 + sigma**2))
         return {'a': a, 'b': b, 'rho': rho, 'm': m, 'sigma': sigma}
     
-    def raw_svi_paramterization(self, asset, expiry, side):
+    def raw_svi_parameterization(self, asset, expiry, side):
         """
         Using svi_model function, we try to find the best-fit parameters a, b, rho, m, sigma that minimizes the difference between the model's calculated total implied variance and the actual total implied variance from the option chain.
         each option in the option chain comes pre-calculated with its own total implied variance.
@@ -379,7 +375,7 @@ class Binance:
             return None
         return params
     
-    def natural_svi_paramterization(self, asset, expiry, side):
+    def natural_svi_parameterization(self, asset, expiry, side):
         k, total_implied_variances = self.moneyness_array(asset, expiry, side)
         # Initial guess for the parameters delta, mu, rho, omega, zeta
         initial_guess = [total_implied_variances.mean(), k.mean(), 0.0, 0.5, 0.1]
@@ -395,14 +391,14 @@ class Binance:
             return None
         return params
     
-    def svi_jw_paramterization(self, asset, expiry, side):
-        a, b, rho, m, sigma = self.raw_svi_paramterization(asset, expiry, side)
+    def svi_jw_parameterization(self, asset, expiry, side):
+        a, b, rho, m, sigma = self.raw_svi_parameterization(asset, expiry, side)
         # Convert raw SVI parameters to JW parameters
         t = self.option_markets[asset][expiry]['C'][0]['time_to_expiry'] if side == 'C' else self.option_markets[asset][expiry]['P'][0]['time_to_expiry']
         svi_params = self.raw_to_svi_jw(a, b, rho, m, sigma, t)
         return svi_params['vt'], svi_params['psit'], svi_params['pt'], svi_params['ct'], svi_params['vt_min']
     
-    def get_svi_curve_points(self, asset, expiry, side, paramterization_type='raw'):
+    def get_svi_curve_points(self, asset, expiry, side, parameterization_type='raw'):
         """
         Get SVI curve points for a given asset, expiry, and side.
         :param asset: Asset to get SVI curve points for
@@ -410,13 +406,13 @@ class Binance:
         :param side: Side to get SVI curve points for
         :return: SVI curve points
         """
-        if paramterization_type not in ['raw', 'natural']:
+        if parameterization_type not in ['raw', 'natural']:
             raise ValueError("Invalid parameterization type. Use 'raw' or 'natural'.")
-        if paramterization_type == 'natural':
-            params = self.natural_svi_paramterization(asset, expiry, side)
+        if parameterization_type == 'natural':
+            params = self.natural_svi_parameterization(asset, expiry, side)
             delta, mu, rho, omega, zeta = params
-        elif paramterization_type == 'raw':
-            params = self.raw_svi_paramterization(asset, expiry, side)
+        elif parameterization_type == 'raw':
+            params = self.raw_svi_parameterization(asset, expiry, side)
             a, b, rho, m, sigma = params
         
         k = []
@@ -428,20 +424,20 @@ class Binance:
         else:
             options_list = self.option_markets[asset][expiry][side]
             k = [float(option['log_moneyness']) for option in options_list]
-        options_list = [(option['log_moneyness'], option['markIV']) for option in options_list if 'markIV' in option]
+
         x_points = np.linspace(min(k)-0.1, max(k)+0.1, 100)  # Adjust range as needed
-        if paramterization_type == 'natural':
+        if parameterization_type == 'natural':
             svi_values = self.natural_svi(x_points, delta, mu, rho, omega, zeta)
-        elif paramterization_type == 'raw':
+        elif parameterization_type == 'raw':
             svi_values = self.raw_svi(x_points, a, b, rho, m, sigma)
         points = []
         time_to_expiry = self.option_markets[asset][expiry]['C'][0]['time_to_expiry'] if side == 'C' else self.option_markets[asset][expiry]['P'][0]['time_to_expiry']
+        forward_price = self.option_markets[asset][expiry]['C'][0]['forward_price'] if side == 'C' else self.option_markets[asset][expiry]['P'][0]['forward_price']
         implied_vols = np.sqrt(svi_values / time_to_expiry)  # Convert total implied variance to implied volatility
-        self.get_spot_markets()
-        spot_price = Decimal(self.spot_prices[self.underlyings[asset]])
+        spot_price = float(self.spot_prices[self.underlyings[asset]])
         for k_val, iv in zip(x_points, implied_vols):
-            strike = spot_price / Decimal(math.exp(k_val))
-            moneyness = Decimal(math.exp(k_val))
+            strike = math.exp(k_val) * forward_price
+            moneyness = strike/forward_price
             points.append({
                 'logMoneyness': float(k_val),
                 'strikePrice': float(strike),
