@@ -98,6 +98,7 @@ class Binance:
                 self.option_markets[asset][expiry] = {'C': [], 'P': []}
             self.option_markets[asset][expiry][side].append({
                 "symbol": symbol['symbol'],
+                "side": side,
                 "strikePrice": float(strike_price),
                 "expiry": expiry_timestamp,
                 "time_to_expiry_ms": expiry_timestamp - self.cur_time,
@@ -244,7 +245,7 @@ class Binance:
 
         if option_type == 'C':
             return S * norm.cdf(d1) - K * math.exp(-r * T) * norm.cdf(d2)
-        else:
+        elif option_type == 'P':
             return K * math.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
         else:
             raise ValueError("Invalid option type. Use 'C' for call and 'P' for put.")
@@ -295,13 +296,15 @@ class Binance:
             days_to_expiry = option['days_to_expiry']
             moneyness = option['moneyness']
             log_moneyness = option['log_moneyness']
+            side = option['side']
             spot_price = float(self.spot_prices[option['underlying']])
             bsm_price = self.calculate_option_price(spot_price, strike_price, time_to_expiry, risk_free_rate, mark_iv, side)
-            res.append({
+            forward_price = option['forward_price']
+            append_data = {
                 'symbol': symbol,
                 'strikePrice': strike_price,
                 'markPrice': mark_price,
-                'markIV': mark_iv,
+                'impliedVolatility': mark_iv,
                 'riskFreeRate': risk_free_rate,
                 'timeToExpiry': time_to_expiry,
                 'daysToExpiry': days_to_expiry,
@@ -309,7 +312,9 @@ class Binance:
                 'logMoneyness': log_moneyness,
                 'spotPrice': spot_price,
                 'bsmPrice': bsm_price,
-            })
+                'forwardPrice': forward_price,
+            }
+            res.append(append_data)
         return res
     
     def moneyness_array(self, asset, expiry, side):
