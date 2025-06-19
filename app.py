@@ -1,18 +1,14 @@
 import requests
-from dotenv import load_dotenv
-import os
-import json
-import pprint
-from decimal import Decimal, getcontext
+from concurrent.futures import ThreadPoolExecutor
 import time
 from scipy.stats import norm
-from scipy.optimize import curve_fit, minimize
+from scipy.optimize import curve_fit
 import math
-import matplotlib.pyplot as plt
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import numpy as np
-getcontext().prec = 20
+from svi_no_arbitrage import SVINoArbitrage
+from apscheduler.schedulers.background import BackgroundScheduler
 class Binance:
     def __init__(self, proxy=None):
         self.derivatives_base_endpoint = "https://eapi.binance.com"
@@ -37,25 +33,26 @@ class Binance:
         self.spot_prices = {}
         self.underlyings = {}
         self.expiry_dates = {}
+        self.options_info = {}
+        self.option_card_data = {}
         self.cur_time = time.time() * 1000
-        self.get_market_info()
-        self.get_spot_markets()
-        self.get_options()
-        self.insert_mark_info()
-
-    def get_orderbook(self, symbol, limit=100):
-        """
-        Get order book for a symbol
-        :param symbol: Symbol to get order book for
-        :param limit: Limit of order book
-        :return: Order book
-        """
-        params = {
-            "symbol": symbol,
-            "limit": limit
-        }
-        response = requests.get(self.endpoints['orderbook'], params=params, proxies=self.proxies)
-        return response.json()
+        self.last_exchange_update = None
+        self.last_options_update = None
+        self.last_spot_update = None
+        self.scheduler = BackgroundScheduler()
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            future_exchange = executor.submit(self.get_exchange_info)
+            future_spot = executor.submit(self.get_spot_markets) 
+            future_options = executor.submit(self.get_options_info)
+            
+            # Wait for all to complete
+            exchange_result = future_exchange.result()
+            spot_result = future_spot.result()
+            options_result = future_options.result()
+        self.parse_options()
+        self.parse_iv_info()
+        self.scheduler.add_job(self.refresh_spot_options,"interval", seconds=5)
+        self.scheduler.start()
     
     def get_spot_markets(self):
         """
@@ -68,18 +65,21 @@ class Binance:
             symbol = item['symbol']
             price = float(item['price'])
             self.spot_prices[symbol] = price
+        self.last_spot_update = int(round(time.time() * 1000))
         return self.spot_prices
 
-    def get_marks(self):
+    def get_options_info(self):
         """
         Get mark price for a symbol
         :param symbol: Symbol to get mark price for
         :return: Mark price
         """
         response = requests.get(self.endpoints['mark'], proxies=self.proxies)
-        return response.json()
+        self.last_options_update = int(round(time.time() * 1000))
+        self.options_info = response.json()
+        return self.options_info
 
-    def get_options(self):
+    def parse_options(self):
         """
         Get option symbols
         :return: Option symbols
@@ -116,7 +116,7 @@ class Binance:
             self.expiry_dates[asset] = sorted(self.expiry_dates[asset], key=lambda x: x[0])
         return self.underlyings, self.option_markets
 
-    def get_market_info(self):
+    def get_exchange_info(self):
         """
         Get market info
         :return: Market info
@@ -125,7 +125,7 @@ class Binance:
             response = requests.get(self.endpoints['info'], proxies=self.proxies)
 
             self.market_info = response.json()
-
+        self.last_exchange_update = self.market_info["serverTime"]
         return self.market_info
     
     def get_endpoint(self, endpoint, params=None):
@@ -137,16 +137,8 @@ class Binance:
         response = requests.get(self.endpoints[endpoint], params=params, proxies=self.proxies)
         return response.json()
     
-    def get_option_info(self, symbol):
-        """
-        Get option info
-        :param symbol: Symbol to get option info for
-        :return: Option info
-        """
-        response = requests.get(self.endpoints['mark'], params={'symbol': symbol}, proxies=self.proxies)
-        return response.json()
-    def insert_mark_info(self):
-        mark_info = self.get_marks()
+    def parse_iv_info(self):
+        mark_info = self.options_info
         for data in mark_info:
             symbol = data['symbol']
             mark_price = float(data['markPrice'])
@@ -168,8 +160,8 @@ class Binance:
                     'mark_price': mark_price,
                     'mark_iv': mark_iv,
                     'risk_free_rate': risk_free_rate,
-                    'log_moneyness': math.log(strike_price/forward_price),
-                    'moneyness': strike_price/forward_price,
+                    'log_moneyness': math.log(forward_price/strike_price),
+                    'moneyness': forward_price/strike_price,
                     'total_implied_variance': total_implied_variance,
                     'forward_price': forward_price,
                 }
@@ -274,6 +266,8 @@ class Binance:
         else:
             chain = self.option_chain(asset, expiry, side)
             res = {side: chain}
+        res['lastOptionUpdate'] = self.last_options_update
+        res['lastExchangeUpdate'] = self.last_exchange_update
         return res
     
     def option_chain(self, asset, expiry, side):
@@ -340,26 +334,8 @@ class Binance:
     def natural_svi(self, k, delta, mu, rho, omega, zeta):
         return delta + (omega/2) * (1 + (zeta*rho*(k - mu)) + np.sqrt((zeta*(k-mu) + rho) ** 2 + (1 - rho**2)))
     
-    
-    def raw_to_svi_jw(self, a, b, rho, m, sigma, t):
-        sqrt_term = np.sqrt(m**2 + sigma**2)
-        vt = (a + b * (-rho * m + sqrt_term)) / t
-        wt = vt * t
-        psit = (b / (2 * np.sqrt(wt))) * (-m / sqrt_term + rho)
-        pt = (b / np.sqrt(wt)) * (1 - rho)
-        ct = (b / np.sqrt(wt)) * (1 + rho)
-        vt_min = (a + b * sigma * np.sqrt(1 - rho**2)) / t
-        return {'vt': vt, 'psit': psit, 'pt': pt, 'ct': ct, 'vt_min': vt_min}
 
-    def svi_jw_to_raw(self, vt, psit, pt, ct, vt_min, t):
-        wt = vt * t
-        b = 0.5 * np.sqrt(wt) * (pt + ct)
-        rho = (ct - pt) / (ct + pt)
-        m = -sigma * (psit * 2 * np.sqrt(wt) / b - rho)
-        sigma = (vt_min * t - a) / (b * np.sqrt(1 - rho**2))
-        a = vt * t - b * (-rho * m + np.sqrt(m**2 + sigma**2))
-        return {'a': a, 'b': b, 'rho': rho, 'm': m, 'sigma': sigma}
-    
+
     def raw_svi_parameterization(self, asset, expiry, side):
         """
         Using svi_model function, we try to find the best-fit parameters a, b, rho, m, sigma that minimizes the difference between the model's calculated total implied variance and the actual total implied variance from the option chain.
@@ -367,17 +343,13 @@ class Binance:
         """
         k, total_implied_variances = self.moneyness_array(asset, expiry, side)
         
-        # Initial guess for the parameters a, b, rho, m, sigma
-        initial_guess = [total_implied_variances.mean(), 0.5, 0.0, k.mean(), 0.1]
-        # Bounds for the parameters a, b, rho, m, sigma
-        # a: all real numbers, b >= 0, rho: [-1, 1], m: all real numbers, sigma > 0
-        bounds = ([-np.inf, 0, -0.999, -np.inf, 0.001], 
-                  [np.inf, np.inf, 0.999, np.inf, np.inf])
-        try:
-            params, _ = curve_fit(self.raw_svi, k, total_implied_variances, p0=initial_guess, bounds=bounds, maxfev=10000)
-        except Exception as e:
-            print(f"Error during SVI fit: {e}")
-            return None
+        fitter = SVINoArbitrage()
+        params = fitter.constrained_svi_fit(k, total_implied_variances)
+
+        is_valid, message = self.validate_no_arbitrage(asset, expiry, side, params)
+        if not is_valid:
+            print(f"Warning: {message}")
+    
         return params
     
     def natural_svi_parameterization(self, asset, expiry, side):
@@ -396,6 +368,46 @@ class Binance:
             return None
         return params
     
+    def validate_no_arbitrage(self, asset, expiry, side, params):
+        """
+        Validate that SVI parameters satisfy no-arbitrage conditions.
+        """
+        a, b, rho, m, sigma = params
+        
+        # Check basic constraints
+        if b < 0:
+            print("Constraints violated: b must be non-negative")
+            return False, "b must be non-negative"
+        if abs(rho) >= 1:
+            print("Constraints violated: |rho| must be < 1")
+            return False, "|rho| must be < 1"
+        if sigma <= 0:
+            print("Constraints violated: sigma must be positive")
+            return False, "sigma must be positive"
+        
+        # Check b(1 + |rho|) <= 4
+        if b * (1 + abs(rho)) > 4:
+            print("Constraints violated: b(1 + |rho|) > 4 violates no-arbitrage")
+            return False, "b(1 + |rho|) > 4 violates no-arbitrage"
+        
+        # Check minimum variance
+        w_min = a + b * sigma * np.sqrt(1 - rho**2)
+        if w_min < 0:
+            print("Constraints violated: Minimum total variance is negative")
+            return False, "Minimum total variance is negative"
+        
+        # Check butterfly arbitrage at sample points
+        k_data, _ = self.moneyness_array(asset, expiry, side)
+        k_test = np.linspace(np.min(k_data) - 1, np.max(k_data) + 1, 50)
+        
+        for k in k_test:
+            w = a + b * (rho * (k - m) + np.sqrt((k - m)**2 + sigma**2))
+            if w < 0:
+                print(f"Constraints violated: Negative total variance at k={k}")
+                return False, f"Negative total variance at k={k}"
+        
+        return True, "No arbitrage violations detected"
+        
     def svi_jw_parameterization(self, asset, expiry, side):
         a, b, rho, m, sigma = self.raw_svi_parameterization(asset, expiry, side)
         # Convert raw SVI parameters to JW parameters
@@ -440,18 +452,50 @@ class Binance:
         forward_price = self.option_markets[asset][expiry]['C'][0]['forward_price'] if side == 'C' else self.option_markets[asset][expiry]['P'][0]['forward_price']
         implied_vols = np.sqrt(svi_values / time_to_expiry)  # Convert total implied variance to implied volatility
         spot_price = float(self.spot_prices[self.underlyings[asset]])
+        risk_free_rate = self.option_markets[asset][expiry]['C'][0]['risk_free_rate'] if side == 'C' else self.option_markets[asset][expiry]['P'][0]['risk_free_rate']
         for k_val, iv in zip(x_points, implied_vols):
-            strike = math.exp(k_val) * forward_price
-            moneyness = strike/forward_price
+            moneyness = math.exp(k_val)
+            strike = forward_price / moneyness
+            call_premium = self.calculate_option_price(K=strike, T=time_to_expiry, r=risk_free_rate, option_type='C', S=spot_price, sigma=iv)
+            put_premium = self.calculate_option_price(K=strike, T=time_to_expiry, r=risk_free_rate, option_type='P', S=spot_price, sigma=iv)
             points.append({
                 'logMoneyness': float(k_val),
                 'strikePrice': float(strike),
                 'moneyness': float(moneyness),
                 'impliedVolatility': float(iv),
+                'callPremium': call_premium,
+                'putPremium': put_premium
             })
         return (points, params.tolist())
+    
+    def refresh_exchange_info(self, minutes=60):
+        now = int(round(time.time() * 1000))
+        if(now - self.last_exchange_update) > (minutes * 60 * 1000): 
+            self.get_exchange_info()
 
-        
+    def refresh_options_info(self, seconds=5):
+        now = int(round(time.time() * 1000))
+        if (now - self.last_options_update) > (seconds* 1000):
+            self.get_options_info()
+    
+    def refresh_spot_info(self, seconds=5):
+        now = int(round(time.time() * 1000))
+        if (now - self.last_spot_update) > (seconds * 1000):
+            self.get_spot_markets()
+
+    def refresh_spot_options(self):
+        print("refreshing spot options")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_spot = executor.submit(self.get_spot_markets) 
+            future_options = executor.submit(self.get_options_info)
+            
+            # Wait for all to complete
+            spot_result = future_spot.result()
+            options_result = future_options.result()
+        self.parse_iv_info()
+    
+
+
 app = Flask(__name__)
 CORS(app)
 BinanceAPI = Binance()
@@ -536,6 +580,15 @@ def get_svi_curve():
     if points is None:
         return jsonify({'error': 'Failed to calculate SVI curve'}), 500
     return jsonify({'points': points, 'params': params, 'parameterization_type': parameterization_type})
+
+@app.route('/api/refresh/spot_options', methods=["GET"])
+def refresh_spot_options():
+    try:
+        BinanceAPI.refresh_spot_options()
+    except Exception as e:
+        print(f"Error refreshing spot markets and options: {e}")
+        return 500
+    
 
 @app.route("/")
 def index():
