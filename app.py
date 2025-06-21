@@ -6,9 +6,11 @@ from scipy.optimize import curve_fit
 import math
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from flask_compress import Compress
 import numpy as np
 from svi_no_arbitrage import SVINoArbitrage
 from apscheduler.schedulers.background import BackgroundScheduler
+import logging
 class Binance:
     def __init__(self, proxy=None):
         self.derivatives_base_endpoint = "https://eapi.binance.com"
@@ -39,6 +41,7 @@ class Binance:
         self.last_exchange_update = None
         self.last_options_update = None
         self.last_spot_update = None
+        self.session = requests.Session()
         self.scheduler = BackgroundScheduler()
         with ThreadPoolExecutor(max_workers=3) as executor:
             future_exchange = executor.submit(self.get_exchange_info)
@@ -59,7 +62,7 @@ class Binance:
         Get spot markets
         :return: Spot markets
         """
-        response = requests.get(self.endpoints['spot'], proxies=self.proxies)
+        response = self.session.get(self.endpoints['spot'], proxies=self.proxies)
         data = response.json()
         for item in data:
             symbol = item['symbol']
@@ -74,7 +77,7 @@ class Binance:
         :param symbol: Symbol to get mark price for
         :return: Mark price
         """
-        response = requests.get(self.endpoints['mark'], proxies=self.proxies)
+        response = self.session.get(self.endpoints['mark'], proxies=self.proxies)
         self.last_options_update = int(round(time.time() * 1000))
         self.options_info = response.json()
         return self.options_info
@@ -108,12 +111,12 @@ class Binance:
             })
             if asset not in self.expiry_dates:
                 self.expiry_dates[asset] = set()
-            self.expiry_dates[asset].add((expiry_timestamp, expiry))
+            self.expiry_dates[asset].add((expiry, expiry_timestamp))
         for asset in self.option_markets:
             for expiry in self.option_markets[asset]:
                 self.option_markets[asset][expiry]['C'] = sorted(self.option_markets[asset][expiry]['C'], key=lambda x: x['strikePrice'])
                 self.option_markets[asset][expiry]['P'] = sorted(self.option_markets[asset][expiry]['P'], key=lambda x: x['strikePrice'])
-            self.expiry_dates[asset] = sorted(self.expiry_dates[asset], key=lambda x: x[0])
+            self.expiry_dates[asset] = sorted(self.expiry_dates[asset], key=lambda x: x[1])
         return self.underlyings, self.option_markets
 
     def get_exchange_info(self):
@@ -122,7 +125,7 @@ class Binance:
         :return: Market info
         """
         if len(self.market_info) == 0:
-            response = requests.get(self.endpoints['info'], proxies=self.proxies)
+            response = self.session.get(self.endpoints['info'], proxies=self.proxies)
 
             self.market_info = response.json()
         self.last_exchange_update = self.market_info["serverTime"]
@@ -134,7 +137,7 @@ class Binance:
         :param endpoint: Endpoint to get
         :return: Endpoint
         """
-        response = requests.get(self.endpoints[endpoint], params=params, proxies=self.proxies)
+        response = self.session.get(self.endpoints[endpoint], params=params, proxies=self.proxies)
         return response.json()
     
     def parse_iv_info(self):
@@ -166,8 +169,10 @@ class Binance:
                     'forward_price': forward_price,
                 }
                 self.option_markets[asset][expiry][side][idx].update(mark_data)
-            else:
-                print(f"Mark info not found for {symbol}")
+                self.option_markets[asset][expiry]['timeToExpiry'] = time_to_expiry 
+                self.option_markets[asset][expiry]['forwardPrice'] = forward_price 
+                self.option_markets[asset][expiry]['riskFreeRate'] = risk_free_rate 
+                
     
 
     def find_mark_index(self, asset, expiry, strike, side):
@@ -268,6 +273,12 @@ class Binance:
             res = {side: chain}
         res['lastOptionUpdate'] = self.last_options_update
         res['lastExchangeUpdate'] = self.last_exchange_update
+        res['asset'] = asset
+        res['expiry'] = expiry
+        res['timeToExpiry'] = self.option_markets[asset][expiry]['timeToExpiry']
+        res['forwardPrice'] = self.option_markets[asset][expiry]['forwardPrice']
+        res['riskFreeRate'] = self.option_markets[asset][expiry]['riskFreeRate']
+        res['spotPrice'] = self.spot_prices[self.underlyings[asset]]
         return res
     
     def option_chain(self, asset, expiry, side):
@@ -329,6 +340,10 @@ class Binance:
         return k, total_implied_variances
     
     def raw_svi(self, k, a, b, rho, m, sigma):
+        """
+        k = log moneyness
+        returns: total implied variance (implied vol**2)*time to expiry
+        """
         return a + b * (rho * (k - m) + np.sqrt((k - m)**2 + sigma**2))
     
     def natural_svi(self, k, delta, mu, rho, omega, zeta):
@@ -348,25 +363,35 @@ class Binance:
 
         is_valid, message = self.validate_no_arbitrage(asset, expiry, side, params)
         if not is_valid:
-            print(f"Warning: {message}")
+            return None
     
         return params
     
     def natural_svi_parameterization(self, asset, expiry, side):
         k, total_implied_variances = self.moneyness_array(asset, expiry, side)
         # Initial guess for the parameters delta, mu, rho, omega, zeta
-        initial_guess = [total_implied_variances.mean(), k.mean(), 0.0, 0.5, 0.1]
+        # initial_guess = [total_implied_variances.mean(), k.mean(), 0.0, 0.5, 0.1]
         # Bounds for the parameters delta, mu, rho, omega, zeta
         # delta: all real numbers, mu: all real numbers, rho: [-1, 1], omega >= 0, zeta > 0
         bounds = ([-np.inf, -np.inf, -0.999, 0, 0.001], 
                   [np.inf, np.inf, 0.999, np.inf, np.inf])
         
-        try:
-            params, _ = curve_fit(self.natural_svi, k, total_implied_variances, p0=initial_guess, bounds=bounds, maxfev=10000)
-        except Exception as e:
-            print(f"Error during SVI fit: {e}")
-            return None
-        return params
+        initial_guesses = [
+        [total_implied_variances.mean(), k.mean(), 0.0, 0.5, 0.1],
+        [np.median(total_implied_variances), 0.0, 0.0, 0.3, 0.1],
+        [total_implied_variances[len(total_implied_variances)//2], k.mean(), -0.3, 0.8, 0.2],
+        ]
+    
+        for guess in initial_guesses:
+            try:
+                params, _ = curve_fit(self.natural_svi, k, total_implied_variances, p0=guess, bounds=bounds, maxfev=10000)
+                predicted = self.natural_svi(k, *params)
+                if np.all(predicted > 0): 
+                    return params
+            except:
+                continue
+        
+        return None 
     
     def validate_no_arbitrage(self, asset, expiry, side, params):
         """
@@ -376,24 +401,19 @@ class Binance:
         
         # Check basic constraints
         if b < 0:
-            print("Constraints violated: b must be non-negative")
             return False, "b must be non-negative"
         if abs(rho) >= 1:
-            print("Constraints violated: |rho| must be < 1")
             return False, "|rho| must be < 1"
         if sigma <= 0:
-            print("Constraints violated: sigma must be positive")
             return False, "sigma must be positive"
         
         # Check b(1 + |rho|) <= 4
         if b * (1 + abs(rho)) > 4:
-            print("Constraints violated: b(1 + |rho|) > 4 violates no-arbitrage")
             return False, "b(1 + |rho|) > 4 violates no-arbitrage"
         
         # Check minimum variance
         w_min = a + b * sigma * np.sqrt(1 - rho**2)
         if w_min < 0:
-            print("Constraints violated: Minimum total variance is negative")
             return False, "Minimum total variance is negative"
         
         # Check butterfly arbitrage at sample points
@@ -403,7 +423,6 @@ class Binance:
         for k in k_test:
             w = a + b * (rho * (k - m) + np.sqrt((k - m)**2 + sigma**2))
             if w < 0:
-                print(f"Constraints violated: Negative total variance at k={k}")
                 return False, f"Negative total variance at k={k}"
         
         return True, "No arbitrage violations detected"
@@ -427,9 +446,15 @@ class Binance:
             raise ValueError("Invalid parameterization type. Use 'raw' or 'natural'.")
         if parameterization_type == 'natural':
             params = self.natural_svi_parameterization(asset, expiry, side)
+            if params is None:
+                app.logger.error(f"Natural SVI parameterization failed for {asset}-{expiry}-{side}")
+                return None
             delta, mu, rho, omega, zeta = params
         elif parameterization_type == 'raw':
             params = self.raw_svi_parameterization(asset, expiry, side)
+            if params is None:
+                app.logger.error(f"Raw SVI parameterization failed for {asset}-{expiry}-{side}")
+                return None
             a, b, rho, m, sigma = params
         
         k = []
@@ -484,7 +509,6 @@ class Binance:
             self.get_spot_markets()
 
     def refresh_spot_options(self):
-        print("refreshing spot options")
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_spot = executor.submit(self.get_spot_markets) 
             future_options = executor.submit(self.get_options_info)
@@ -497,8 +521,11 @@ class Binance:
 
 
 app = Flask(__name__)
+Compress(app)
 CORS(app)
 BinanceAPI = Binance()
+
+
 
 @app.route('/api/option_chain', methods=['GET', 'POST'])
 def get_option_chain():
@@ -522,19 +549,11 @@ def get_available_assets():
         spot_prices[asset] = BinanceAPI.spot_prices[BinanceAPI.underlyings[asset]]
     return jsonify({'assets': assets, 'spot_prices': spot_prices})
 
-@app.route('/api/expiries', methods=['GET', 'POST'])
+@app.route('/api/expiries', methods=['GET'])
 def get_available_expiries():
-    if request.method == 'POST':
-        data = request.get_json()
-        asset = data.get('asset')
-    else:
-        asset = request.args.get('asset')
-    if not asset:
+
         return jsonify(BinanceAPI.expiry_dates)
-    if asset not in BinanceAPI.expiry_dates:
-        return jsonify({'error': 'Asset not found'}), 404
-    expiries = list(BinanceAPI.expiry_dates[asset])
-    return jsonify({'expiries': expiries})
+   
 
 @app.route('/api/strikes', methods=['GET', 'POST'])
 def get_available_strikes():
@@ -570,15 +589,21 @@ def get_svi_curve():
         side = request.args.get('side')
         parameterization_type = request.args.get('parameterization_type', 'raw')
     try:
-        points, params = BinanceAPI.get_svi_curve_points(asset, expiry, side, parameterization_type)
-
+        result = BinanceAPI.get_svi_curve_points(asset, expiry, side, parameterization_type)
+        if result is None:
+            app.logger.error(f"SVI curve calculation returned None for {asset}-{expiry}-{side}-{parameterization_type}")
+            return jsonify({'error': 'SVI parameterization failed - insufficient or invalid data'}), 400
+        
+        points, params = result
         
     except Exception as e:
-        print(f"Error calculating SVI curve: {e}")
+        app.logger.error(f"Error calculating SVI curve: {e}")
         return jsonify({'error': 'Failed to calculate SVI curve'}), 500
     
     if points is None:
+        app.logger.error(f"Error calculating SVI curve. No points returned: {e}")
         return jsonify({'error': 'Failed to calculate SVI curve'}), 500
+    app.logger.info(f"{parameterization_type} paramterization params: {params}")
     return jsonify({'points': points, 'params': params, 'parameterization_type': parameterization_type})
 
 @app.route('/api/refresh/spot_options', methods=["GET"])
@@ -586,7 +611,7 @@ def refresh_spot_options():
     try:
         BinanceAPI.refresh_spot_options()
     except Exception as e:
-        print(f"Error refreshing spot markets and options: {e}")
+        app.logger.error(f"Error refreshing spot markets and options: {e}")
         return 500
     
 
@@ -597,3 +622,8 @@ def index():
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
 
+if __name__ != '__main__':
+    # Running under gunicorn
+    gunicorn_logger = logging.getLogger('gunicorn.error')
+    app.logger.handlers = gunicorn_logger.handlers
+    app.logger.setLevel(gunicorn_logger.level)
